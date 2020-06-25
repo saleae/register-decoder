@@ -6,6 +6,8 @@ import pytest
 
 from saleae.register_decoder import RegisterMap, Register
 
+from .strategies import register_maps
+
 
 def test_simple_register():
     class MyRegMap(RegisterMap):
@@ -36,31 +38,6 @@ def test_error_on_overlapping_register(x_address, x_address_width, y_address, y_
             data = Register(y_address, address_width=y_address_width, description="Data from device")
 
 
-@strategies.composite
-def register_maps(
-    draw,
-    register_gap=integers(min_value=0, max_value=100),
-    register_width=integers(min_value=1, max_value=100),
-    register_count=integers(min_value=0, max_value=10),
-):
-    current_addr = 0
-    # Generate some registers prior to the targeted register
-    registers = []
-    for _ in range(draw(integers(min_value=0, max_value=10))):
-        # Skip some address entries
-        current_addr += draw(register_gap)
-        # Add a register
-        address_width = draw(register_width)
-        registers.append(Register(current_addr, address_width=address_width))
-        current_addr += address_width
-
-    members = {}
-    for register in registers:
-        members[draw(strategies.from_regex(r"[A-Za-z_]+"))] = register
-
-    return RegisterMap.__class__("MyRegMap", (RegisterMap,), members)
-
-
 @given(register_maps(), strategies.data())
 def test_register_containing(register_map: RegisterMap, data):
     for register in register_map:
@@ -83,8 +60,6 @@ def test_register_containing(register_map: RegisterMap, data):
 
 @given(register_maps(), strategies.data())
 def test_registers_intersecting(register_map: RegisterMap, data):
-    address_max = max((register.address + register.address_width for register in register_map), default=0)
-
     for register in register_map:
         hypothesis.note(f"register = {register!r}")
         # Should be contained in fully intersecting ranges

@@ -1,1 +1,1 @@
-from .register_map import RegisterMap, Register
+from .register_map import RegisterMap, Register, ByteOrder

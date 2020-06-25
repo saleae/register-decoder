@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from enum import Enum
 import inspect
-from typing import Optional, Dict, List, Union, Literal, Callable, Any, Iterator, Iterable
+from typing import Optional, Dict, List, Union, Literal, Callable, Any, Iterator, Iterable, TypeVar, Generic
 
 
-class Endianess(Enum):
+class ByteOrder(Enum):
     LITTLE = "little"
     BIG = "big"
 
 
-class Register:
+T = TypeVar("T")
+
+
+class Register(Generic[T]):
     """
     Represents a register within a :py:class:`~.RegisterMap`\\ .
 
@@ -25,7 +28,9 @@ class Register:
     description: Optional[str]
     value_type: Optional[type]
     _value_parser: Optional[Callable[[bytes], Any]]
-    _endianess: Optional[Endianess]
+    _byte_order: Optional[ByteOrder]
+    _text_encoding: Optional[str]
+    _signed: Optional[bool]
 
     def __init__(
         self,
@@ -33,9 +38,11 @@ class Register:
         *,
         description: Optional[str] = None,
         address_width: int = 1,
-        value_parser: Optional[Callable[[bytes], Any]] = None,
+        value_parser: Optional[Callable[[bytes], T]] = None,
         value_type: Optional[Union[Literal[bytes], Literal[int], Literal[str]]] = None,
-        endianess: Optional[Endianess] = None,
+        byte_order: Optional[ByteOrder] = None,
+        signed: Optional[bool] = None,
+        text_encoding: Optional[str] = None,
     ):
         if address_width < 1:
             raise ValueError("address_width must be at least 1")
@@ -44,7 +51,9 @@ class Register:
         self.description = description
         self.address_width = address_width
         self._value_parser = None
-        self._endianess = None
+        self._byte_order = None
+        self._text_encoding = None
+        self._signed = None
         if value_parser is not None:
             self._value_parser = value_parser
             if value_type is None:
@@ -61,12 +70,27 @@ class Register:
         else:
             self.value_type = bytes
 
-        # Require endianess when using auto-integer
+        # Require byte_order and signed when using auto-integer
         if self.value_type is int and self._value_parser is None:
-            self._endianess = endianess
+            if byte_order is None:
+                raise ValueError("byte_order is required when value_type=int")
+            if signed is None:
+                raise ValueError("signed is required when value_type=int")
+            self._byte_order = byte_order
+            self._signed = signed
         else:
-            if endianess is not None:
-                raise ValueError("endianess is required when value_type=int")
+            if byte_order is not None:
+                raise ValueError("byte_order is only allowed when value_type=int")
+            elif signed is not None:
+                raise ValueError("signed is only allowed when value_type=int")
+
+        # Require text_encoding when using auto-str
+        if self.value_type is str and self._value_parser is None:
+            if text_encoding is None:
+                raise ValueError("text_encoding is required when value_type=str")
+            self._text_encoding = text_encoding
+        elif text_encoding is not None:
+            raise ValueError("text_encoding is only allowed when value_type=str")
 
         # This will be set by RegisterMap's metaclass constructor
         self._name = None
@@ -76,6 +100,16 @@ class Register:
         if self._name is None:
             raise RuntimeError("Register must be used as a class variable inside a RegisterMap")
         return self._name
+
+    def deserialize(self, raw_data: bytes) -> T:
+        if self._value_parser is not None:
+            return self._value_parser(raw_data)
+        elif self.value_type is bytes:
+            return raw_data
+        elif self.value_type is str:
+            return raw_data.decode(self._text_encoding)
+        elif self.value_type is int:
+            return int.from_bytes(raw_data, byteorder=self._byte_order.value, signed=self._signed)
 
     def __repr__(self):
         s = f"Register({hex(self.address)}"
@@ -87,6 +121,12 @@ class Register:
             s += f", value_parser={self._value_parser!r}"
         if self.value_type is not None and self.value_type is not bytes:
             s += f", value_type={self.value_type!r}"
+        if self._byte_order is not None:
+            s += f", byte_order={self._byte_order!r}"
+        if self._signed is not None:
+            s += f", signed={self._signed!r}"
+        if self._text_encoding is not None:
+            s += f", text_encoding={self._text_encoding!r}"
         s += ")"
         return s
 
@@ -212,7 +252,7 @@ class RegisterMap(metaclass=RegisterMapMeta):
             raise ValueError("data must be non-empty")
         if len(data) % self.address_byte_width != 0:
             raise ValueError("data's length must be divisible by the address width")
-        end_address = len(data) // self.address_byte_width
+        end_address = address + len(data) // self.address_byte_width
 
         # Ignore out of range reads/writes
         if address >= self._address_max:
@@ -220,10 +260,24 @@ class RegisterMap(metaclass=RegisterMapMeta):
 
         start_bytes = address * self.address_byte_width
         # Clamp bytes to the end of the internal state we understand
-        end_bytes = min(end_address * self.address_byte_width, self._address_max)
+        end_bytes = min(end_address, self._address_max) * self.address_byte_width
         self._internal_state[start_bytes:end_bytes] = data[: end_bytes - start_bytes]
         for i in range(address, end_address):
             self._internal_state_mask[i] = True
 
         # Find the affected registers
+        return self.__class__.registers_intersecting(slice(address, end_address))
 
+    def deserialize(self, register: Register[T]) -> T:
+        if not all(self._internal_state_mask[register.address : (register.address + register.address_width)]):
+            raise RegisterNotObserved(f"register {register.name!r} has not been observed")
+
+        start_bytes = register.address * self.address_byte_width
+        end_bytes = start_bytes + register.address_width * self.address_byte_width
+        raw_data = bytes(self._internal_state[start_bytes:end_bytes])
+
+        return register.deserialize(raw_data)
+
+
+class RegisterNotObserved(Exception):
+    pass
